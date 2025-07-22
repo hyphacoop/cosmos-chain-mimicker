@@ -1,0 +1,30 @@
+leader_rpc_endpoint = "https://<chain_to_mimic>"
+follower_rpc_endpoint = "https://<transaction_target_chain>"
+records_filename = "records.json"
+save_records = true
+binary = "gaiad"
+denom = "uatom"
+
+signers = [
+  "cosmos*",
+  "cosmos*",
+  "cosmos*"
+]
+
+[ibc]
+recipient = "cosmos*"
+channel = "channel-*"
+
+[wasm]
+contract = "cosmos*"
+command = "{<escaped JSON string>}"
+
+[authz]
+# List each grantee/granter as a key/value pair.
+# All keys(grantees) must be in the signers array.
+cosmos* = "cosmos*"
+cosmos* = "cosmos*"
+
+[prometheus]
+enable = true
+port = 8000
