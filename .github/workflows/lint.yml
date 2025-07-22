@@ -23,5 +23,8 @@ jobs:
       # install linting
       - run: pip3 install autopep8 yamllint pylint
 
+      # install requirements
+      - run: pip3 install -r requirements
+
       # run lint.sh
       - run: ./lint.sh
