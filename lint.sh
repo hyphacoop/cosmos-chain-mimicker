@@ -8,7 +8,7 @@ then
 	python -m autopep8 --in-place --recursive .
 
     echo "Linting python"
-    python -m pylint ./*.py --disable=W1510
+    python -m pylint src/*.py --disable=W1510
 fi
 
 if [ $CI ]

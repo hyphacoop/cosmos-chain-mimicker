@@ -1,6 +1,14 @@
+"""
+Helper functions for tx JSON file generation
+"""
+
 import time
 
+
 def send_message_json(sender, recipient, amount, denom: str = "uatom"):
+    """
+    Assemble bank send message
+    """
     return {
         "@type": "/cosmos.bank.v1beta1.MsgSend",
         "to_address": recipient,
@@ -10,6 +18,9 @@ def send_message_json(sender, recipient, amount, denom: str = "uatom"):
 
 
 def multisend_message_json(sender, recipients, amount, denom: str = "uatom"):
+    """
+    Assemble bank multi-send message
+    """
     outputs = []
     for recipient in recipients:
         outputs.append(
@@ -24,7 +35,8 @@ def multisend_message_json(sender, recipients, amount, denom: str = "uatom"):
             {
                 "address": sender,
                 "coins": [
-                    {"denom": str(denom), "amount": str(amount * len(recipients))}
+                    {"denom": str(denom), "amount": str(
+                        amount * len(recipients))}
                 ],
             }
         ],
@@ -33,6 +45,9 @@ def multisend_message_json(sender, recipients, amount, denom: str = "uatom"):
 
 
 def delegate_message_json(del_addr, val_addr, amount, denom: str = "uatom"):
+    """
+    Assemble staking delegate message
+    """
     return {
         "@type": "/cosmos.staking.v1beta1.MsgDelegate",
         "delegator_address": del_addr,
@@ -44,6 +59,9 @@ def delegate_message_json(del_addr, val_addr, amount, denom: str = "uatom"):
 def redelegate_message_json(
     del_addr, src_addr, dst_addr, amount, denom: str = "uatom"
 ):
+    """
+    Assemble staking redelegate message
+    """
     return {
         "@type": "/cosmos.staking.v1beta1.MsgBeginRedelegate",
         "delegator_address": del_addr,
@@ -54,6 +72,9 @@ def redelegate_message_json(
 
 
 def undelegate_message_json(del_addr, val_addr, amount, denom: str = "uatom"):
+    """
+    Assemble staking unbond message
+    """
     return {
         "@type": "/cosmos.staking.v1beta1.MsgUndelegate",
         "delegator_address": del_addr,
@@ -63,13 +84,20 @@ def undelegate_message_json(del_addr, val_addr, amount, denom: str = "uatom"):
 
 
 def withdraw_reward_message_json(del_addr, val_addr):
+    """
+    Assemble distribution withdraw-reward message
+    """
     return {
         "@type": "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
         "delegator_address": del_addr,
         "validator_address": val_addr,
     }
 
+
 def vote_message_json(voter: str, proposal: str, option: str = "VOTE_OPTION_YES"):
+    """
+    Assemble gov vote message
+    """
     return {
         "@type": "/cosmos.gov.v1.MsgVote",
         "proposal_id": proposal,
@@ -78,19 +106,27 @@ def vote_message_json(voter: str, proposal: str, option: str = "VOTE_OPTION_YES"
         "metadata": ""
     }
 
+
 def authz_exec_message_json(grantee: str, msgs: list):
+    """
+    Assemble authz exec message
+    """
     return {
         "@type": "/cosmos.authz.v1beta1.MsgExec",
         "grantee": grantee,
         "msgs": msgs
     }
 
+
 def liquid_tokenize_message_json(
-    delegator: str,
-    validator: str,
-    owner: str,
-    amount: int,
-    denom: str = "uatom"):
+        delegator: str,
+        validator: str,
+        owner: str,
+        amount: int,
+        denom: str = "uatom"):
+    """
+    Assemble liquid tokenize-shares message
+    """
     return {
         "@type": '/gaia.liquid.v1beta1.MsgTokenizeShares',
         "delegator_address": delegator,
@@ -102,10 +138,14 @@ def liquid_tokenize_message_json(
         "tokenized_share_owner": owner
     }
 
+
 def liquid_redeem_message_json(
-    delegator: str,
-    amount: str,
-    denom: str):
+        delegator: str,
+        amount: str,
+        denom: str):
+    """
+    Assemble liquid redeem-tokens message
+    """
     return {
         "@type": '/gaia.liquid.v1beta1.MsgRedeemTokensForShares',
         "delegator_address": delegator,
@@ -114,22 +154,29 @@ def liquid_redeem_message_json(
             "amount": amount
         }
     }
-        
 
-def ibc_transfer_message_json(sender: str, receiver: str, channel: str, amount, denom: str = "uatom", timeout_offset: int=3600000000000):
+
+def ibc_transfer_message_json(sender: str, recipient: dict,
+                              amount: int, denom: str = "uatom",
+                              timeout_offset: int = 3600000000000):
+    """
+    Assemble ibc-transfer transfer message
+    """
+    receiver = recipient['receiver']
+    channel = recipient['channel']
     return {
         "@type": "/ibc.applications.transfer.v1.MsgTransfer",
         "source_port": "transfer",
         "source_channel": channel,
         "token": {
-          "denom": "uatom",
-          "amount": "1"
+            "denom": denom,
+            "amount": f'{amount}'
         },
         "sender": sender,
         "receiver": receiver,
         "timeout_height": {
-          "revision_number": "0",
-          "revision_height": "0"
+            "revision_number": "0",
+            "revision_height": "0"
         },
         "timeout_timestamp": f'{time.time() * 1000000000 + timeout_offset:.0f}',
         "memo": "",
@@ -137,7 +184,11 @@ def ibc_transfer_message_json(sender: str, receiver: str, channel: str, amount, 
 
     }
 
-def wasm_execute_message_json(sender: str, contract: str, msg: dict, funds: list=[]):
+
+def wasm_execute_message_json(sender: str, contract: str, msg: dict, funds: list):
+    """
+    Assemble wasm execute message
+    """
     return {
         "@type": "/cosmwasm.wasm.v1.MsgExecuteContract",
         "sender": sender,
@@ -146,6 +197,7 @@ def wasm_execute_message_json(sender: str, contract: str, msg: dict, funds: list
         "funds": funds
     }
 
+
 def transaction_json(
     messages: list,
     gas_prices: float = 0.005,
@@ -153,6 +205,9 @@ def transaction_json(
     gas_limit: int = 1000000,
     memo: str = "",
 ):
+    """
+    Compile transaction JSON from message array
+    """
     fee_amount = int(gas_limit * gas_prices)
     return {
         "body": {
@@ -172,4 +227,3 @@ def transaction_json(
             },
         },
     }
-
