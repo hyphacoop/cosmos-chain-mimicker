@@ -8,13 +8,13 @@ then
 	python -m autopep8 --in-place --recursive .
 
     echo "Linting python"
-    python -m pylint src/*.py --disable=R0914
+    python -m pylint src/*.py
 fi
 
 if [ $CI ]
 then
     echo "Linting python"
-    find . -type f -name "*.py" | xargs pylint --disable=R0914
+    find . -type f -name "*.py" | xargs pylint
     if [ $? -ne 0 ]
     then
     	pylint=1
