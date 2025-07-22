@@ -180,12 +180,12 @@ def transaction_broadcast(signed_json: str, url_rpc: str, binary: str = "gaiad")
     Broadcasts the transaction.
     """
     p = subprocess.run([binary,
-        "tx",
-        "broadcast",
-        signed_json,
-        "--node",url_rpc,
-        "--output", "json"
-        ],
-        capture_output=True, check=False)
+                        "tx",
+                        "broadcast",
+                        signed_json,
+                        "--node", url_rpc,
+                        "--output", "json"
+                        ],
+                       capture_output=True, check=False)
     response = p.stdout.decode("utf-8")
     return json.loads(response)

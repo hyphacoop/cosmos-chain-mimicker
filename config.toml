@@ -1,10 +1,11 @@
-leader_rpc_endpoint = "https://<chain_to_mimic>"
-follower_rpc_endpoint = "https://<transaction_target_chain>"
-records_filename = "records.json"
-save_records = true
+[leader]
+rpc = "https://<chain_to_mimic>"
+binary = "gaiad"
+
+[follower]
+rpc = "https://<transaction_target_chain>"
 binary = "gaiad"
 denom = "uatom"
-
 signers = [
   "cosmos*",
   "cosmos*",
@@ -24,6 +25,10 @@ command = "{<escaped JSON string>}"
 # All keys(grantees) must be in the signers array.
 cosmos* = "cosmos*"
 cosmos* = "cosmos*"
+
+[records]
+enable = true
+records_filename = "records.json"
 
 [prometheus]
 enable = true

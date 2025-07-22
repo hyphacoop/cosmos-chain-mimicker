@@ -19,39 +19,10 @@ class ChainMimicker():
     """
     Mimics transactions by reviewing each message in a block.
     """
-    def __init__(self, config_file: str = 'config.toml'):
-        self.UNSUPPORTED_MESSAGE_TYPES = [
-            'cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission',
-            '/ibc.core.channel.v1.MsgAcknowledgement',
-            '/ibc.core.channel.v1.MsgUpdateClient',
-            '/ibc.core.client.v1.MsgUpdateClient',
-            '/ibc.core.channel.v1.MsgRecvPacket',
-            '/cosmos.authz.v1beta1.MsgGrant',
-            '/cosmos.authz.v1beta1.MsgRevoke',
-            '/cosmwasm.wasm.v1.MsgStoreCode',
-            '/cosmwasm.wasm.v1.MsgInstantiateContract'
-            '/gaia.liquid.v1beta1.MsgWithdrawAllTokenizeShareRecordReward'
-        ]
-        self.LEADER_RPC_ENDPOINT = ''
-        self.FOLLOWER_RPC_ENDPOINT = ''
-        self.BINARY = 'gaiad'
-        self.DENOM = ''
-        self.SIGNERS = []
-        self.RECIPIENT = ''
-        self.IBC = {
-            'recipient': '',
-            'channel': ''
-        }
-        self.WASM = {
-            'contract': '',
-            'command': {}
-        }
-        self.AUTHZ_GRANTS = {}
 
-        self.records_enabled = False
-        self.records_filename = ''
-        self.prometheus_enabled = False
-        self.prometheus_port = 8000
+    def __init__(self, config_file: str = 'config.toml'):
+        self.config = {
+        }
         self.records = {
             'total_messages': 0,
             'total_transactions': 0,
@@ -73,12 +44,14 @@ class ChainMimicker():
             'transactions', 'Total processed transactions')
         self.counter_gas = Counter('gas_total', 'Total consumed gas')
         self.gauge_signer_balances = Gauge(
-            'signer_balances', f'Signer balances in {self.DENOM}', ['address'])
+            'signer_balances',
+            f'Signer balances in {self.config['follower']['denom']}',
+            ['address'])
 
-        if self.records_enabled:
+        if self.config['records']['enable']:
             self.load_records()
 
-        if self.prometheus_enabled:
+        if self.config['prometheus']['enable']:
             threading.Thread(target=self.start_metrics_server,
                              daemon=True).start()
         asyncio.run(self.monitor_block())
@@ -87,37 +60,27 @@ class ChainMimicker():
         """
         Run prometheus metrics server
         """
-        start_http_server(self.prometheus_port)
+        start_http_server(self.config['prometheus']['port'])
 
     def load_config(self, filename):
         """
         Populate settings
         """
         config = toml.load(filename)
-        self.LEADER_RPC_ENDPOINT = config['leader_rpc_endpoint']
-        self.FOLLOWER_RPC_ENDPOINT = config['follower_rpc_endpoint']
-        self.records_filename = config['records_filename']
-        self.records_enabled = config['save_records']
-
-        self.BINARY = config['binary']
-        self.DENOM = config['denom']
-        self.SIGNERS = config['signers']
-        self.IBC['recipient'] = config['ibc']['recipient']
-        self.IBC['channel'] = config['ibc']['channel']
-        self.WASM['contract'] = config['wasm']['contract']
-        self.WASM['command'] = json.loads(config['wasm']['command'])
-        # for index, grantee in enumerate(config['grantees']):
-        #     self.AUTHZ_GRANTS[grantee] = config['granters'][index]
-        self.AUTHZ_GRANTS = config['authz']
-        self.prometheus_enabled = config['prometheus']['enable']
-        self.prometheus_port = config['prometheus']['port']
+        self.config['leader'] = config['leader']
+        self.config['follower'] = config['follower']
+        self.config['ibc'] = config['ibc']
+        self.config['wasm'] = config['wasm']
+        self.config['authz'] = config['authz']
+        self.config['records'] = config['records']
+        self.config['prometheus'] = config['prometheus']
 
     def load_records(self):
         """
         Populate records dictionary
         """
-        if os.path.exists(self.records_filename):
-            with open(self.records_filename, 'r', encoding='utf-8') as infile:
+        if os.path.exists(self.config['records']['filename']):
+            with open(self.config['records']['filename'], 'r', encoding='utf-8') as infile:
                 self.records = json.load(infile)
         else:
             self.save_records()
@@ -126,17 +89,33 @@ class ChainMimicker():
         """
         Save records dictionary
         """
-        with open(self.records_filename, 'w', encoding='utf-8') as outfile:
+        with open(self.config['records']['filename'], 'w', encoding='utf-8') as outfile:
             json.dump(self.records, outfile, indent=4)
+
+    def get_validator_addresses(self, url_rpc: str, amount: int = 1):
+        """
+        Return amount of validator addresses requested.
+        """
+        addresses = []
+        validators = utils_cli.staking_validators_bonded(
+            url_rpc, binary=self.config['follower']['binary'])
+        while len(addresses) < amount:
+            val = random.choice(validators)
+            addresses.append(val['operator_address'])
+            validators.remove(val)
+        return addresses
 
     def get_leader_block(self, height):
         """
         Returns a dictionary with the block height and a list of transactions.
         """
         if height == 0:
-            height = int(utils.get_current_height(self.LEADER_RPC_ENDPOINT))
+            height = int(utils.get_current_height(
+                self.config['leader']['rpc']))
         txs = utils_cli.txs_query(
-            url_rpc=self.LEADER_RPC_ENDPOINT, query=f"tx.height={height}", binary=self.BINARY)
+            url_rpc=self.config['leader']['rpc'],
+            query=f"tx.height={height}",
+            binary=self.config['leader']['binary'])
         total_count = int(txs['total_count'])
         block = {'height': height, 'txs': []}
         if total_count > 0:
@@ -153,206 +132,214 @@ class ChainMimicker():
         """
         Returns a transaction assembled with the message types from the provided transaction.
         """
-        ttx = None
-        msgs = []
-        msg = ''
-        for message in tx['msgs']:
-            if '/cosmos.bank.v1beta1.MsgSend' in message:
-                msg = utils_tx.send_message_json(
-                    sender=signer,
-                    recipient=self.SIGNERS[random.randint(
-                        0, len(self.SIGNERS) - 1)],
-                    amount=1,
-                    denom=self.DENOM
-                )
-            elif '/cosmos.bank.v1beta1.MsgMultiSend' in message:
-                msg = utils_tx.multisend_message_json(
-                    sender=signer,
-                    recipients=self.SIGNERS,
-                    amount=1,
-                    denom=self.DENOM
-                )
-            elif '/cosmos.staking.v1beta1.MsgDelegate' in message:
-                # Find a validator to delegate to
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                val = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                msg = utils_tx.delegate_message_json(
-                    del_addr=signer,
-                    val_addr=val,
-                    amount=5,
-                    denom=self.DENOM
-                )
-            elif '/cosmos.staking.v1beta1.MsgBeginRedelegate' in message:
-                # Check if the redelegation entries have reached the limit
-                max_entries = int(utils_cli.staking_params(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)['max_entries'])
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                srcval = validators[random.randint(0, len(validators) - 1)]
-                src = srcval['operator_address']
-                if not utils_cli.staking_delegation(
-                        self.FOLLOWER_RPC_ENDPOINT,
-                        signer,
-                        src,
-                        binary=self.BINARY):
-                    continue
-                validators.remove(srcval)
-                dst = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                redels = utils_cli.staking_redelegations(
-                    self.FOLLOWER_RPC_ENDPOINT, signer, src=src, dst=dst, binary=self.BINARY)
-                if not redels:
-                    continue
-                if 'entries' in redels and len(redels['entries']) >= max_entries:
-                    continue
-                msg = utils_tx.redelegate_message_json(
-                    del_addr=signer,
-                    src_addr=src,
-                    dst_addr=dst,
-                    amount=1,
-                    denom=self.DENOM
-                )
-            elif '/cosmos.staking.v1beta1.MsgUndelegate' in message:
-                # Check if the unbonding delegation entries have reached the limit
-                max_entries = int(utils_cli.staking_params(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)['max_entries'])
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                val = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                if not utils_cli.staking_delegation(
-                        self.FOLLOWER_RPC_ENDPOINT,
-                        signer,
-                        val,
-                        binary=self.BINARY):
-                    continue
-                unbondings = utils_cli.staking_unbonding(
-                    self.FOLLOWER_RPC_ENDPOINT,
+        def handle_msg_send():
+            return utils_tx.send_message_json(
+                sender=signer,
+                recipient=random.choice(self.config['follower']['signers']),
+                amount=1,
+                denom=self.config['follower']['denom']
+            )
+
+        def handle_msg_multisend():
+            return utils_tx.multisend_message_json(
+                sender=signer,
+                recipients=self.config['follower']['signers'],
+                amount=1,
+                denom=self.config['follower']['denom']
+            )
+
+        def handle_msg_delegate():
+            val = self.get_validator_addresses(
+                self.config['follower']['rpc'])[0]
+            return utils_tx.delegate_message_json(
+                del_addr=signer,
+                val_addr=val,
+                amount=5,
+                denom=self.config['follower']['denom']
+            )
+
+        def handle_msg_redelegate():
+            max_entries = int(utils_cli.staking_params(
+                self.config['follower']['rpc'],
+                binary=self.config['follower']['binary'])['max_entries'])
+            vals = self.get_validator_addresses(
+                self.config['follower']['rpc'], amount=2)
+            src = vals[0]
+            dst = vals[1]
+            if not utils_cli.staking_delegation(
+                    self.config['follower']['rpc'],
+                    signer,
+                    src,
+                    binary=self.config['follower']['binary']):
+                return None
+            redels = utils_cli.staking_redelegations(
+                self.config['follower']['rpc'],
+                signer,
+                src=src,
+                dst=dst,
+                binary=self.config['follower']['binary'])
+            if not redels:
+                return None
+            if 'entries' in redels and len(redels['entries']) >= max_entries:
+                return None
+            return utils_tx.redelegate_message_json(
+                del_addr=signer,
+                src_addr=src,
+                dst_addr=dst,
+                amount=1,
+                denom=self.config['follower']['denom']
+            )
+
+        def handle_msg_undelegate():
+            max_entries = int(utils_cli.staking_params(
+                self.config['follower']['rpc'],
+                binary=self.config['follower']['binary'])['max_entries'])
+            val = self.get_validator_addresses(
+                self.config['follower']['rpc'])[0]
+            if not utils_cli.staking_delegation(
+                    self.config['follower']['rpc'],
                     signer,
                     val,
-                    binary=self.BINARY
-                )
-                if 'entries' in unbondings and len(unbondings['entries']) >= max_entries:
-                    continue
-                msg = utils_tx.undelegate_message_json(
-                    del_addr=signer,
-                    val_addr=val,
-                    amount=1,
-                    denom=self.DENOM
-                )
-            elif '/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward' in message:
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                val = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                if not utils_cli.staking_delegation(
-                        self.FOLLOWER_RPC_ENDPOINT,
-                        signer,
-                        val,
-                        binary=self.BINARY):
-                    continue
+                    binary=self.config['follower']['binary']):
+                return None
+            unbondings = utils_cli.staking_unbonding(
+                self.config['follower']['rpc'],
+                signer,
+                val,
+                binary=self.config['follower']['binary']
+            )
+            if 'entries' in unbondings and len(unbondings['entries']) >= max_entries:
+                return None
+            return utils_tx.undelegate_message_json(
+                del_addr=signer,
+                val_addr=val,
+                amount=1,
+                denom=self.config['follower']['denom']
+            )
 
-                msg = utils_tx.withdraw_reward_message_json(
-                    del_addr=signer,
-                    val_addr=val
-                )
-                # msgs.append(msg)
-            elif '/cosmos.gov.v1beta1.MsgVote' in message or '/cosmos.gov.v1.MsgVote' in message:
-                # Get proposals in voting period
-                proposals = utils_cli.gov_proposals(
-                    url_rpc=self.FOLLOWER_RPC_ENDPOINT,
-                    status='voting-period',
-                    binary=self.BINARY
-                )
-                if not proposals:
-                    logging.info(
-                        '%s skipped: no proposals in voting period.', message)
-                    continue
-                logging.info('Proposals in voting period: %s', proposals)
-                proposal_id = proposals[0]['id']
-                msg = utils_tx.vote_message_json(
-                    voter=signer,
-                    proposal=proposal_id
-                )
-            elif '/cosmwasm.wasm.v1.MsgExecuteContract' in message:
-                msg = utils_tx.wasm_execute_message_json(
-                    sender=signer,
-                    contract=self.WASM['contract'],
-                    msg=self.WASM['command'],
-                    funds=[]
-                )
-            elif '/cosmos.authz.v1beta1.MsgExec' in message:
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                val1 = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                val2 = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                val3 = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                vals = [val1, val2, val3]
-                msg = utils_tx.authz_exec_message_json(
-                    grantee=signer,
-                    msgs=[utils_tx.withdraw_reward_message_json(
-                        self.AUTHZ_GRANTS[signer], val_addr) for val_addr in vals]
-                )
-            elif '/gaia.liquid.v1beta1.MsgTokenizeShare' in message:
-                validators = utils_cli.staking_validators_bonded(
-                    self.FOLLOWER_RPC_ENDPOINT, binary=self.BINARY)
-                val = validators[random.randint(
-                    0, len(validators) - 1)]['operator_address']
-                if not utils_cli.staking_delegation(
-                        self.FOLLOWER_RPC_ENDPOINT,
-                        signer,
-                        val,
-                        binary=self.BINARY):
-                    continue
+        def handle_msg_withdraw_reward():
+            val = self.get_validator_addresses(
+                self.config['follower']['rpc'])[0]
+            if not utils_cli.staking_delegation(
+                    self.config['follower']['rpc'],
+                    signer,
+                    val,
+                    binary=self.config['follower']['binary']):
+                return None
+            return utils_tx.withdraw_reward_message_json(
+                del_addr=signer,
+                val_addr=val
+            )
 
-                msg = utils_tx.liquid_tokenize_message_json(
-                    delegator=signer,
-                    validator=val,
-                    owner=signer,
-                    amount=2
-                )
-            elif '/gaia.liquid.v1beta1.MsgRedeemTokensForShares' in message:
-                for balance in utils_cli.bank_balances(
-                        url_rpc=self.FOLLOWER_RPC_ENDPOINT,
-                        wallet=signer,
-                        binary=self.BINARY):
-                    if 'cosmosvaloper' in balance['denom']:
-                        msg = utils_tx.liquid_redeem_message_json(
-                            delegator=signer,
-                            denom=balance['denom'],
-                            amount=balance['amount']
-                        )
-                        continue
-            elif '/ibc.applications.transfer.v1.MsgTransfer' in message:
-                ibc_recipient = {
-                    'receiver': self.IBC['recipient'],
-                    'channel': self.IBC['channel']
-                }
-                msg = utils_tx.ibc_transfer_message_json(
-                    sender=signer,
-                    recipient=ibc_recipient,
-                    amount=1,
-                    denom=self.DENOM
-                )
-            elif message in self.UNSUPPORTED_MESSAGE_TYPES:
+        def handle_msg_vote():
+            proposals = utils_cli.gov_proposals(
+                url_rpc=self.config['follower']['rpc'],
+                status='voting-period',
+                binary=self.config['follower']['binary']
+            )
+            if not proposals:
+                logging.info(
+                    '%s skipped: no proposals in voting period.', message)
+                return None
+            logging.info('Proposals in voting period: %s', proposals)
+            return utils_tx.vote_message_json(
+                voter=signer,
+                proposal=proposals[0]['id']
+            )
+
+        def handle_msg_wasm_execute():
+            return utils_tx.wasm_execute_message_json(
+                sender=signer,
+                contract=self.config['wasm']['contract'],
+                msg=self.config['wasm']['command'],
+                funds=[]
+            )
+
+        def handle_msg_authz_exec():
+            vals = self.get_validator_addresses(
+                self.config['follower']['rpc'], random.randint(1, 5))
+            return utils_tx.authz_exec_message_json(
+                grantee=signer,
+                msgs=[utils_tx.withdraw_reward_message_json(
+                    self.config['authz'][signer], val_addr) for val_addr in vals]
+            )
+
+        def handle_msg_liquid_tokenize():
+            val = self.get_validator_addresses(
+                self.config['follower']['rpc'])[0]
+            if not utils_cli.staking_delegation(
+                    self.config['follower']['rpc'],
+                    signer,
+                    val,
+                    binary=self.config['follower']['binary']):
+                return None
+
+            return utils_tx.liquid_tokenize_message_json(
+                delegator=signer,
+                validator=val,
+                owner=signer,
+                amount=2
+            )
+
+        def handle_msg_liquid_redeem():
+            for balance in utils_cli.bank_balances(
+                    url_rpc=self.config['follower']['rpc'],
+                    wallet=signer,
+                    binary=self.config['follower']['binary']):
+                if 'cosmosvaloper' in balance['denom']:
+                    return utils_tx.liquid_redeem_message_json(
+                        delegator=signer,
+                        denom=balance['denom'],
+                        amount=balance['amount']
+                    )
+            return None
+
+        def handle_msg_ibc_transfer():
+            ibc_recipient = {
+                'receiver': self.config['ibc']['recipient'],
+                'channel': self.config['ibc']['channel']
+            }
+            return utils_tx.ibc_transfer_message_json(
+                sender=signer,
+                recipient=ibc_recipient,
+                amount=1,
+                denom=self.config['follower']['denom']
+            )
+        dispatch = {
+            '/cosmos.bank.v1beta1.MsgSend': handle_msg_send,
+            '/cosmos.bank.v1beta1.MsgMultiSend': handle_msg_multisend,
+            '/cosmos.staking.v1beta1.MsgDelegate': handle_msg_delegate,
+            '/cosmos.staking.v1beta1.MsgBeginRedelegate': handle_msg_redelegate,
+            '/cosmos.staking.v1beta1.MsgUndelegate': handle_msg_undelegate,
+            '/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward': handle_msg_withdraw_reward,
+            '/cosmos.gov.v1beta1.MsgVote': handle_msg_vote,
+            '/cosmos.gov.v1.MsgVote': handle_msg_vote,
+            '/cosmwasm.wasm.v1.MsgExecuteContract': handle_msg_wasm_execute,
+            '/cosmos.authz.v1beta1.MsgExec': handle_msg_authz_exec,
+            '/gaia.liquid.v1beta1.MsgTokenizeShare': handle_msg_liquid_tokenize,
+            '/gaia.liquid.v1beta1.MsgRedeemTokensForShares': handle_msg_liquid_redeem,
+            '/ibc.applications.transfer.v1.MsgTransfer': handle_msg_ibc_transfer
+        }
+
+        msgs = []
+        for message in tx['msgs']:
+            handler = dispatch.get(message)
+            if handler:
+                msg = handler()
+                if msg:
+                    msgs.append(msg)
+            elif message not in dispatch:
                 logging.info('%s skipped: unsupported message type', message)
             else:
                 logging.info('%s skipped: unrecognized message type', message)
-            if msg:
-                msgs.append(msg)
+
         if msgs:
-            ttx = utils_tx.transaction_json(
+            return utils_tx.transaction_json(
                 messages=msgs,
-                memo='Mimic mainnet block ' +
-                str(height) if height else 'Mimic mainnet block',
-                fee_denom=self.DENOM
+                memo=f'Mimic mainnet block {height}' if height else 'Mimic mainnet block',
+                fee_denom=self.config['follower']['denom']
             )
-        return ttx
+        return None
 
     def mimic_transactions(self, height: int):
         """
@@ -363,7 +350,7 @@ class ChainMimicker():
             logging.info("No transactions to mimic.")
             return
 
-        signers_bucket = copy.deepcopy(self.SIGNERS)
+        signers_bucket = copy.deepcopy(self.config['follower']['signers'])
         tx_count = 0
         msg_count = 0
         for tx in block['txs']:
@@ -379,11 +366,11 @@ class ChainMimicker():
                 unsigned_json='unsigned.json',
                 signer=signer,
                 signed_json='signed.json',
-                binary=self.BINARY)
+                binary=self.config['follower']['binary'])
             response = utils_cli.transaction_broadcast(
                 signed_json='signed.json',
-                url_rpc=self.FOLLOWER_RPC_ENDPOINT,
-                binary=self.BINARY)
+                url_rpc=self.config['follower']['rpc'],
+                binary=self.config['follower']['binary'])
             if response['code'] != 0:
                 logging.info(
                     'Leader block %s tx failed: %s: %s',
@@ -397,18 +384,18 @@ class ChainMimicker():
             tx_count += 1
             for msg in transformed_tx['body']['messages']:
                 msg_type = msg['@type']
-                if self.prometheus_enabled:
+                if self.config['prometheus']['enable']:
                     self.counter_messages.labels(msg_type=msg_type).inc()
-                if self.records_enabled:
+                if self.config['records']['enable']:
                     if msg_type in self.records['messages']:
                         self.records['messages'][msg_type] += 1
                     else:
                         self.records['messages'][msg_type] = 1
 
         # Update Prometheus metrics
-        if self.prometheus_enabled:
+        if self.config['prometheus']['enable']:
             self.counter_transactions.inc(tx_count)
-        if self.records_enabled:
+        if self.config['records']['enable']:
             self.records['total_messages'] += msg_count
             self.records['total_transactions'] += tx_count
 
@@ -421,7 +408,7 @@ class ChainMimicker():
             return
         for tx_hash in self.tx_hashes:
             hash_data = utils_cli.tx(
-                self.FOLLOWER_RPC_ENDPOINT, tx_hash, binary=self.BINARY)
+                self.config['follower']['rpc'], tx_hash, binary=self.config['follower']['binary'])
             if hash_data:
                 gas_used = int(hash_data['gas_used'])
                 gas_amount += gas_used
@@ -432,11 +419,11 @@ class ChainMimicker():
         """
         Update balance metrics for available signers
         """
-        for signer in self.SIGNERS:
+        for signer in self.config['follower']['signers']:
             balances = utils_cli.bank_balances(
-                self.FOLLOWER_RPC_ENDPOINT, signer, binary=self.BINARY)
+                self.config['follower']['rpc'], signer, binary=self.config['follower']['binary'])
             for balance in balances:
-                if self.DENOM in balance['denom']:
+                if self.config['follower']['denom'] in balance['denom']:
                     self.gauge_signer_balances.labels(
                         address=signer).set(int(balance['amount']))
 
@@ -448,7 +435,7 @@ class ChainMimicker():
             '{ "jsonrpc": "2.0", "method": "subscribe", \
             "params": ["tm.event=\'NewBlock\'"], "id": 1 }'
 
-        ws_url = self.FOLLOWER_RPC_ENDPOINT.replace('http', 'ws')
+        ws_url = self.config['follower']['rpc'].replace('http', 'ws')
         ws_url = ws_url.replace('https', 'wss')
         ws_url = ws_url + '/websocket'
         processing = False
@@ -457,7 +444,6 @@ class ChainMimicker():
             try:
                 await websocket.send(ws_newblock_subscription)
                 logging.info('Subscribed to NewBlock event.')
-                # await websocket.recv()
                 while True:
                     await websocket.recv()
                     if processing:  # debounce
@@ -465,13 +451,13 @@ class ChainMimicker():
                             'Still processing previous block, skipping NewBlock event')
                         continue
                     processing = True
-                    leader_height = int(utils.get_status(self.LEADER_RPC_ENDPOINT)[
+                    leader_height = int(utils.get_status(self.config['leader']['rpc'])[
                                         'sync_info']['latest_block_height'])
-                    if self.prometheus_enabled:
+                    if self.config['prometheus']['enable']:
                         self.calculate_gas()
                         self.update_balances()
                     self.mimic_transactions(leader_height)
-                    if self.records_enabled:
+                    if self.config['records']['enable']:
                         self.save_records()
                     processing = False
             except websockets.exceptions.ConnectionClosedError as cce:
