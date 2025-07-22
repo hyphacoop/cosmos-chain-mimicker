@@ -125,7 +125,7 @@ def liquid_tokenize_message_json(
         amount: int,
         denom: str = "uatom"):
     """
-    Assemble liquid tokenize-shares message
+    Assemble liquid tokenize-share message
     """
     return {
         "@type": '/gaia.liquid.v1beta1.MsgTokenizeShares',

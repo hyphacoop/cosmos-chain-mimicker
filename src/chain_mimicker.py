@@ -6,13 +6,12 @@ import copy
 import logging
 import json
 import asyncio
-import random
 import os
 import threading
 import websockets
 import toml
 from prometheus_client import start_http_server, Counter, Gauge
-from src import utils, utils_cli, utils_tx
+from src import utils, utils_cli, utils_tx, message_adapter
 
 
 class ChainMimicker():
@@ -23,11 +22,6 @@ class ChainMimicker():
     def __init__(self, config_file: str = 'config.toml'):
         self.config = {
         }
-        self.records = {
-            'total_messages': 0,
-            'total_transactions': 0,
-            'messages': {}
-        }
         logging.basicConfig(
             filename=None,
             level=logging.INFO,
@@ -35,8 +29,6 @@ class ChainMimicker():
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         self.load_config(config_file)
-
-        self.tx_hashes = []
 
         self.counter_messages = Counter(
             'messages', 'Total processed messages', ['msg_type'])
@@ -47,6 +39,14 @@ class ChainMimicker():
             'signer_balances',
             f'Signer balances in {self.config['follower']['denom']}',
             ['address'])
+
+        self.msg_adapter = message_adapter.MessageAdapter(self.config)
+        self.records = {
+            'total_messages': 0,
+            'total_transactions': 0,
+            'messages': {},
+            'tx_hashes': []
+        }
 
         if self.config['records']['enable']:
             self.load_records()
@@ -60,7 +60,7 @@ class ChainMimicker():
         """
         Run prometheus metrics server
         """
-        start_http_server(self.config['prometheus']['port'])
+        start_http_server(self.config['prometheus']['port'], addr='127.0.0.1')
 
     def load_config(self, filename):
         """
@@ -92,19 +92,6 @@ class ChainMimicker():
         with open(self.config['records']['filename'], 'w', encoding='utf-8') as outfile:
             json.dump(self.records, outfile, indent=4)
 
-    def get_validator_addresses(self, url_rpc: str, amount: int = 1):
-        """
-        Return amount of validator addresses requested.
-        """
-        addresses = []
-        validators = utils_cli.staking_validators_bonded(
-            url_rpc, binary=self.config['follower']['binary'])
-        while len(addresses) < amount:
-            val = random.choice(validators)
-            addresses.append(val['operator_address'])
-            validators.remove(val)
-        return addresses
-
     def get_leader_block(self, height):
         """
         Returns a dictionary with the block height and a list of transactions.
@@ -128,218 +115,23 @@ class ChainMimicker():
                 block['txs'].append(tx_entry)
         return block
 
-    def tx_transform(self, tx, signer, height: int = 0):
+    def tx_transform(self, tx, signer, height):
         """
         Returns a transaction assembled with the message types from the provided transaction.
         """
-        def handle_msg_send():
-            return utils_tx.send_message_json(
-                sender=signer,
-                recipient=random.choice(self.config['follower']['signers']),
-                amount=1,
-                denom=self.config['follower']['denom']
-            )
-
-        def handle_msg_multisend():
-            return utils_tx.multisend_message_json(
-                sender=signer,
-                recipients=self.config['follower']['signers'],
-                amount=1,
-                denom=self.config['follower']['denom']
-            )
-
-        def handle_msg_delegate():
-            val = self.get_validator_addresses(
-                self.config['follower']['rpc'])[0]
-            return utils_tx.delegate_message_json(
-                del_addr=signer,
-                val_addr=val,
-                amount=5,
-                denom=self.config['follower']['denom']
-            )
-
-        def handle_msg_redelegate():
-            max_entries = int(utils_cli.staking_params(
-                self.config['follower']['rpc'],
-                binary=self.config['follower']['binary'])['max_entries'])
-            vals = self.get_validator_addresses(
-                self.config['follower']['rpc'], amount=2)
-            src = vals[0]
-            dst = vals[1]
-            if not utils_cli.staking_delegation(
-                    self.config['follower']['rpc'],
-                    signer,
-                    src,
-                    binary=self.config['follower']['binary']):
-                return None
-            redels = utils_cli.staking_redelegations(
-                self.config['follower']['rpc'],
-                signer,
-                src=src,
-                dst=dst,
-                binary=self.config['follower']['binary'])
-            if not redels:
-                return None
-            if 'entries' in redels and len(redels['entries']) >= max_entries:
-                return None
-            return utils_tx.redelegate_message_json(
-                del_addr=signer,
-                src_addr=src,
-                dst_addr=dst,
-                amount=1,
-                denom=self.config['follower']['denom']
-            )
-
-        def handle_msg_undelegate():
-            max_entries = int(utils_cli.staking_params(
-                self.config['follower']['rpc'],
-                binary=self.config['follower']['binary'])['max_entries'])
-            val = self.get_validator_addresses(
-                self.config['follower']['rpc'])[0]
-            if not utils_cli.staking_delegation(
-                    self.config['follower']['rpc'],
-                    signer,
-                    val,
-                    binary=self.config['follower']['binary']):
-                return None
-            unbondings = utils_cli.staking_unbonding(
-                self.config['follower']['rpc'],
-                signer,
-                val,
-                binary=self.config['follower']['binary']
-            )
-            if 'entries' in unbondings and len(unbondings['entries']) >= max_entries:
-                return None
-            return utils_tx.undelegate_message_json(
-                del_addr=signer,
-                val_addr=val,
-                amount=1,
-                denom=self.config['follower']['denom']
-            )
-
-        def handle_msg_withdraw_reward():
-            val = self.get_validator_addresses(
-                self.config['follower']['rpc'])[0]
-            if not utils_cli.staking_delegation(
-                    self.config['follower']['rpc'],
-                    signer,
-                    val,
-                    binary=self.config['follower']['binary']):
-                return None
-            return utils_tx.withdraw_reward_message_json(
-                del_addr=signer,
-                val_addr=val
-            )
-
-        def handle_msg_vote():
-            proposals = utils_cli.gov_proposals(
-                url_rpc=self.config['follower']['rpc'],
-                status='voting-period',
-                binary=self.config['follower']['binary']
-            )
-            if not proposals:
-                logging.info(
-                    '%s skipped: no proposals in voting period.', message)
-                return None
-            logging.info('Proposals in voting period: %s', proposals)
-            return utils_tx.vote_message_json(
-                voter=signer,
-                proposal=proposals[0]['id']
-            )
-
-        def handle_msg_wasm_execute():
-            return utils_tx.wasm_execute_message_json(
-                sender=signer,
-                contract=self.config['wasm']['contract'],
-                msg=self.config['wasm']['command'],
-                funds=[]
-            )
-
-        def handle_msg_authz_exec():
-            vals = self.get_validator_addresses(
-                self.config['follower']['rpc'], random.randint(1, 5))
-            return utils_tx.authz_exec_message_json(
-                grantee=signer,
-                msgs=[utils_tx.withdraw_reward_message_json(
-                    self.config['authz'][signer], val_addr) for val_addr in vals]
-            )
-
-        def handle_msg_liquid_tokenize():
-            val = self.get_validator_addresses(
-                self.config['follower']['rpc'])[0]
-            if not utils_cli.staking_delegation(
-                    self.config['follower']['rpc'],
-                    signer,
-                    val,
-                    binary=self.config['follower']['binary']):
-                return None
-
-            return utils_tx.liquid_tokenize_message_json(
-                delegator=signer,
-                validator=val,
-                owner=signer,
-                amount=2
-            )
-
-        def handle_msg_liquid_redeem():
-            for balance in utils_cli.bank_balances(
-                    url_rpc=self.config['follower']['rpc'],
-                    wallet=signer,
-                    binary=self.config['follower']['binary']):
-                if 'cosmosvaloper' in balance['denom']:
-                    return utils_tx.liquid_redeem_message_json(
-                        delegator=signer,
-                        denom=balance['denom'],
-                        amount=balance['amount']
-                    )
-            return None
-
-        def handle_msg_ibc_transfer():
-            ibc_recipient = {
-                'receiver': self.config['ibc']['recipient'],
-                'channel': self.config['ibc']['channel']
-            }
-            return utils_tx.ibc_transfer_message_json(
-                sender=signer,
-                recipient=ibc_recipient,
-                amount=1,
-                denom=self.config['follower']['denom']
-            )
-        dispatch = {
-            '/cosmos.bank.v1beta1.MsgSend': handle_msg_send,
-            '/cosmos.bank.v1beta1.MsgMultiSend': handle_msg_multisend,
-            '/cosmos.staking.v1beta1.MsgDelegate': handle_msg_delegate,
-            '/cosmos.staking.v1beta1.MsgBeginRedelegate': handle_msg_redelegate,
-            '/cosmos.staking.v1beta1.MsgUndelegate': handle_msg_undelegate,
-            '/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward': handle_msg_withdraw_reward,
-            '/cosmos.gov.v1beta1.MsgVote': handle_msg_vote,
-            '/cosmos.gov.v1.MsgVote': handle_msg_vote,
-            '/cosmwasm.wasm.v1.MsgExecuteContract': handle_msg_wasm_execute,
-            '/cosmos.authz.v1beta1.MsgExec': handle_msg_authz_exec,
-            '/gaia.liquid.v1beta1.MsgTokenizeShare': handle_msg_liquid_tokenize,
-            '/gaia.liquid.v1beta1.MsgRedeemTokensForShares': handle_msg_liquid_redeem,
-            '/ibc.applications.transfer.v1.MsgTransfer': handle_msg_ibc_transfer
-        }
-
         msgs = []
+        self.msg_adapter.set_signer(signer)
         for message in tx['msgs']:
-            handler = dispatch.get(message)
-            if handler:
-                msg = handler()
-                if msg:
-                    msgs.append(msg)
-            elif message not in dispatch:
-                logging.info('%s skipped: unsupported message type', message)
-            else:
-                logging.info('%s skipped: unrecognized message type', message)
-
-        if msgs:
-            return utils_tx.transaction_json(
-                messages=msgs,
-                memo=f'Mimic mainnet block {height}' if height else 'Mimic mainnet block',
-                fee_denom=self.config['follower']['denom']
-            )
-        return None
+            msg = self.msg_adapter.adapt(message)
+            if msg:
+                msgs.append(msg)
+        if not msgs:
+            return None
+        return utils_tx.transaction_json(
+            messages=msgs,
+            memo=f'Mimic mainnet block {height}' if height else 'Mimic mainnet block',
+            fee_denom=self.config['follower']['denom']
+        )
 
     def mimic_transactions(self, height: int):
         """
@@ -359,6 +151,7 @@ class ChainMimicker():
             signer = signers_bucket.pop(0)
             transformed_tx = self.tx_transform(tx, signer, block['height'])
             if not transformed_tx:
+                # signers_bucket.append(signer)
                 continue
             with open('unsigned.json', 'w', encoding='utf-8') as outfile:
                 json.dump(transformed_tx, outfile, indent=4)
@@ -379,7 +172,7 @@ class ChainMimicker():
                     response['raw_log'])
                 continue
             txhash = response['txhash']
-            self.tx_hashes.append(txhash)
+            self.records['tx_hashes'].append(txhash)
             msg_count += len(transformed_tx['body']['messages'])
             tx_count += 1
             for msg in transformed_tx['body']['messages']:
@@ -404,15 +197,15 @@ class ChainMimicker():
         Update gas metrics for available tx hashes
         """
         gas_amount = 0
-        if not self.tx_hashes:
+        if not self.records['tx_hashes']:
             return
-        for tx_hash in self.tx_hashes:
+        for tx_hash in self.records['tx_hashes']:
             hash_data = utils_cli.tx(
                 self.config['follower']['rpc'], tx_hash, binary=self.config['follower']['binary'])
             if hash_data:
                 gas_used = int(hash_data['gas_used'])
                 gas_amount += gas_used
-        self.tx_hashes.clear()
+        self.records['tx_hashes'].clear()
         self.counter_gas.inc(gas_amount)
 
     def update_balances(self):
